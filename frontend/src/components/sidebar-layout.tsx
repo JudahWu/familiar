@@ -1,0 +1,188 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { SidebarSimpleIcon } from "@phosphor-icons/react";
+
+import { cn } from "@/lib/utils";
+
+const STORAGE_WIDTH = "aiworkstation.sidebar.width";
+const STORAGE_COLLAPSED = "aiworkstation.sidebar.collapsed";
+
+export const SIDEBAR_DEFAULT_WIDTH = 260;
+export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_MAX_WIDTH = 420;
+export const SIDEBAR_RAIL_WIDTH = 52;
+
+function readStoredWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
+  const raw = window.localStorage.getItem(STORAGE_WIDTH);
+  const parsed = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(parsed)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, parsed));
+}
+
+function readStoredCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  // On mobile the sidebar is an overlay, so start collapsed to keep
+  // the main content visible regardless of the stored desktop preference.
+  if (window.matchMedia("(max-width: 767px)").matches) return true;
+  return window.localStorage.getItem(STORAGE_COLLAPSED) === "1";
+}
+
+export function useSidebarLayout() {
+  const [width, setWidthState] = useState<number>(() => readStoredWidth());
+  const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
+
+  const setWidth = useCallback((next: number) => {
+    const clamped = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, next));
+    setWidthState(clamped);
+    window.localStorage.setItem(STORAGE_WIDTH, String(clamped));
+  }, []);
+
+  const setCollapsed = useCallback((next: boolean) => {
+    setCollapsedState(next);
+    window.localStorage.setItem(STORAGE_COLLAPSED, String(next ? "1" : "0"));
+  }, []);
+
+  const toggle = useCallback(() => setCollapsedState((prev) => !prev), []);
+
+  const closeOnMobile = useCallback(() => {
+    if (typeof window === "undefined") return;
+    // State-only: don't persist, so the desktop collapsed preference is preserved.
+    if (window.matchMedia("(max-width: 767px)").matches) setCollapsedState(true);
+  }, []);
+
+  return { width, collapsed, setWidth, setCollapsed, toggle, closeOnMobile };
+}
+
+interface SidebarFrameProps {
+  width: number;
+  setWidth: (next: number) => void;
+  collapsed: boolean;
+  toggle: () => void;
+  className?: string;
+  children: React.ReactNode;
+  /** 折叠态图标栏内容；不传则只渲染一个展开按钮。 */
+  rail?: React.ReactNode;
+}
+
+export function SidebarFrame({
+  width,
+  setWidth,
+  collapsed,
+  toggle,
+  className,
+  children,
+  rail,
+}: SidebarFrameProps) {
+  if (collapsed) {
+    return (
+      <aside
+        style={{ width: SIDEBAR_RAIL_WIDTH }}
+        className={cn(
+          "relative flex h-svh shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar px-2 py-3",
+          className,
+        )}
+      >
+        {rail ?? (
+          <button
+            type="button"
+            aria-label="展开侧栏"
+            onClick={toggle}
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <SidebarSimpleIcon className="size-4" />
+          </button>
+        )}
+      </aside>
+    );
+  }
+
+  return (
+    <aside
+      style={{ width }}
+      className={cn(
+        "relative flex h-svh shrink-0 flex-col",
+        "max-md:fixed max-md:inset-0 max-md:z-40 max-md:!w-full",
+        "max-md:animate-in max-md:fade-in-0 max-md:slide-in-from-left-4 max-md:duration-200 max-md:ease-out",
+        className,
+      )}
+    >
+      {children}
+      <div className="max-md:hidden">
+        <ResizeHandle width={width} onResize={setWidth} />
+      </div>
+    </aside>
+  );
+}
+
+function ResizeHandle({ width, onResize }: { width: number; onResize: (next: number) => void }) {
+  const startRef = useRef<{ x: number; width: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    startRef.current = { x: e.clientX, width };
+    setDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!startRef.current) return;
+    const next = startRef.current.width + (e.clientX - startRef.current.x);
+    onResize(next);
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    startRef.current = null;
+    setDragging(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  useEffect(() => {
+    if (!dragging) return;
+    const prev = document.body.style.cursor;
+    document.body.style.cursor = "col-resize";
+    return () => {
+      document.body.style.cursor = prev;
+    };
+  }, [dragging]);
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      className={cn(
+        "absolute top-0 right-0 z-20 h-full w-1 cursor-col-resize touch-none select-none",
+        "after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-transparent after:transition-colors",
+        "hover:after:bg-border",
+        dragging && "after:bg-border",
+      )}
+    />
+  );
+}
+
+interface SidebarCollapseButtonProps {
+  onToggle: () => void;
+  className?: string;
+}
+
+export function SidebarCollapseButton({ onToggle, className }: SidebarCollapseButtonProps) {
+  return (
+    <button
+      type="button"
+      aria-label="折叠侧栏"
+      onClick={onToggle}
+      className={cn(
+        "flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+        className,
+      )}
+    >
+      <SidebarSimpleIcon className="size-3.5" />
+    </button>
+  );
+}

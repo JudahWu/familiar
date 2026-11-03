@@ -1,0 +1,87 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+
+import { ApiError, api } from "./api"
+import { useSession } from "./session"
+import type { Profile, ProfileUpdate } from "./api"
+
+export function useProfile() {
+  const session = useSession()
+  return useQuery({
+    queryKey: ["profile"],
+    // 后端未提供 /profile 时返回 null，让页面走“环境变量默认值”而不是报错。
+    queryFn: async () => {
+      try {
+        return await api.profile()
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null
+        throw e
+      }
+    },
+    enabled: !!session.data,
+  })
+}
+
+export function useOptions() {
+  const session = useSession()
+  return useQuery({
+    queryKey: ["options"],
+    queryFn: api.options,
+    enabled: !!session.data,
+  })
+}
+
+export function useRepos() {
+  const session = useSession()
+  return useQuery({
+    queryKey: ["repos"],
+    queryFn: async () => {
+      try {
+        return await api.repos()
+      } catch (e) {
+        // 401 = 未登录；404 = 后端没有仓库列表接口。两种情况都返回空列表。
+        if (e instanceof ApiError && (e.status === 401 || e.status === 404))
+          return { installations: [], repositories: [] }
+        throw e
+      }
+    },
+    enabled: !!session.data,
+  })
+}
+
+export function useSaveProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ProfileUpdate) => api.saveProfile(body),
+    onSuccess: (saved) => {
+      qc.setQueryData(["profile"], saved)
+    },
+  })
+}
+
+/**
+ * Build a ProfileUpdate body from the current cached profile plus a patch,
+ * so individual pages can mutate one field without losing values managed by
+ * other pages.
+ */
+export function buildProfileUpdate(
+  current: Profile | undefined,
+  patch: Partial<ProfileUpdate>,
+  fallbackModel: string,
+  fallbackEffort: string
+): ProfileUpdate {
+  return {
+    default_model: current?.default_model ?? fallbackModel,
+    reasoning_effort: current?.reasoning_effort ?? fallbackEffort,
+    default_subagent_model:
+      current?.default_subagent_model ?? current?.default_model ?? fallbackModel,
+    subagent_reasoning_effort:
+      current?.subagent_reasoning_effort ?? current?.reasoning_effort ?? fallbackEffort,
+    default_repo: current?.default_repo ?? null,
+    base_branch: current?.base_branch ?? null,
+    branch_prefix: current?.branch_prefix ?? null,
+    auto_fix_ci: current?.auto_fix_ci ?? true,
+    create_prs: current?.create_prs ?? false,
+    review_draft_prs: current?.review_draft_prs ?? null,
+    ...patch,
+  }
+}

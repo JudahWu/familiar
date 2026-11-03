@@ -1,0 +1,85 @@
+[project]
+name = "familiar"
+version = "0.1.0"
+description = "Familiar — a local-first AI coding agent with a built-in knowledge base."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Familiar contributors" }]
+keywords = ["ai", "coding-agent", "rag", "langgraph", "knowledge-base"]
+dependencies = [
+  # ── 运行时：agent 核心 ──
+  "deepagents>=0.6.11,<0.7",
+  "langgraph>=1.0,<2.0",
+  "langgraph-checkpoint-sqlite>=3.1.0",
+  "langgraph-checkpoint-postgres>=3.1.0",
+  "langgraph-store-postgres==0.1.0",
+  "langchain-openai>=1.3.2",
+  # ── 运行时：Web 服务 ──
+  "fastapi>=0.138.0",
+  "uvicorn>=0.49.0",
+  "pydantic-settings>=2.7,<3.0",
+  "python-multipart>=0.0.9",
+  "pyjwt[crypto]>=2.8.0",
+  "httpx>=0.28,<1.0",
+  "python-dotenv>=1.2.2",
+  # ── 运行时：存储与外部服务 ──
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=2.9",
+  "redis>=5.0",
+  "minio>=7.2",
+  "pymilvus>=2.6,<2.7",
+  "alembic>=1.14,<2.0",
+  # ── 运行时：沙箱执行 ──
+  "opensandbox>=0.1.0",
+  # ── 运行时：知识库（PDF 解析 + 多模态向量 + 版面识别客户端） ──
+  "PyMuPDF>=1.24",
+  "pillow>=10.0",
+  "dashscope>=2.0",
+  # ── 运行时：可观测性 ──
+  "langfuse>=4.14.0,<5.0",
+  "opentelemetry-sdk>=1.45,<2.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.45,<2.0",
+  "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.6",
+  "pyright>=1.1.380",
+]
+
+[project.scripts]
+familiar = "familiar.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["familiar"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+# dotsocr 是从 Multimodal_RAG 原样移植的第三方代码，保持原样便于和上游对齐，
+# 不修它的未使用 import / f-string / import 重定义这类风格噪音。
+[tool.ruff.lint.per-file-ignores]
+"familiar/knowledge/dotsocr/**" = ["F401", "F541", "F811"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not smoke'"
+markers = [
+  "unit: 离线、确定性、不依赖外部服务的单元测试",
+  "integration: 需要 Milvus/Postgres/MinIO 等本地依赖",
+  "smoke: 冒烟脚本（subprocess 跑 verify_*.py，依赖真实服务/LLM）",
+]

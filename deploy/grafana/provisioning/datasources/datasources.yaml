@@ -1,0 +1,33 @@
+# Grafana 数据源（自动 provisioning，容器起来就有，不用手点）
+#
+# Prometheus：指标面板 / 告警（familiar_* 指标）
+# ClickHouse：日志明细（logs.otel_logs 表），用 SQL 查
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+
+  - name: ClickHouse (logs)
+    uid: logs
+    type: grafana-clickhouse-datasource
+    access: proxy
+    jsonData:
+      host: lf-clickhouse
+      port: 9000
+      protocol: native
+      username: clickhouse
+      defaultDatabase: logs
+      dialTimeout: 10
+      queryTimeout: 30
+    secureJsonData:
+      # Grafana 的 provisioning 支持 $__env{...} 读取容器环境变量，
+      # 这样 ClickHouse 密码只维护在 .env / compose 一处。
+      password: $__env{CLICKHOUSE_PASSWORD}

@@ -1,0 +1,20 @@
+# Prometheus 抓取配置
+#
+# 只抓两个目标：collector 暴露的 OTel 指标端点，以及它自己。
+# 应用进程不直接暴露 /metrics —— 指标统一从 collector 出口出，
+# 这样以后加别的服务只要往 collector 发 OTLP，不用改这里。
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    stack: familiar-local
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

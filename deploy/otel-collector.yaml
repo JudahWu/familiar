@@ -1,0 +1,90 @@
+# OpenTelemetry Collector 配置（Familiar 应用侧可观测）
+#
+# 职责：只做“接收 → 简单处理 → 分流”，不在这里做业务聚合。
+#   - logs     → ClickHouse（database=logs，表 otel_logs，TTL 7 天）
+#   - metrics  → 以 Prometheus 格式暴露在 :8889，由 prometheus 定时抓
+#   - traces   → 暂不启用（Langfuse 现在是直连导出，见文末说明）
+#
+# 为什么 traces 不接进来：Langfuse SDK 自己管着一个 TracerProvider，
+# 全局 provider 只能设一次，硬接会出现重复上报或某一方没数据。等以后
+# 确实有第二个服务要接 spans 时，再把 Langfuse 改成
+# `Langfuse(tracer_provider=...)` 统一走 collector。
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # 内存兜底：collector 自己不能把宿主机撑爆
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  # 批量发送，减少对 ClickHouse 的小写入
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+  # 去掉 service.instance.id：每个进程重启都会变，进了 Prometheus 就是
+  # 一条新的时间序列，除了把面板搞乱没别的用。
+  resource/strip_instance:
+    attributes:
+      - key: service.instance.id
+        action: delete
+
+extensions:
+  # 队列持久化：collector 重启时没发出去的日志不会丢
+  file_storage:
+    directory: /var/lib/otelcol
+
+exporters:
+  clickhouse:
+    endpoint: tcp://lf-clickhouse:9000
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
+    database: logs
+    logs_table_name: otel_logs
+    # create_schema 只建表，database 本身由 logs-db-init 建
+    create_schema: true
+    ttl: 168h
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      num_consumers: 4
+      queue_size: 2000
+
+  # 把 OTel 指标翻译成 Prometheus 暴露格式，交给 prometheus 抓
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # 把 service.name / deployment.environment 变成固定 label，
+    # 否则所有指标看起来都像同一个来源（旧字段名 resource_to_telemetry_conversion 已废弃）
+    resource_constant_labels:
+      service_name: familiar
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/strip_instance, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/strip_instance, batch]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      # collector 自身的内部指标不需要
+      level: none

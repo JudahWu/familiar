@@ -1,0 +1,376 @@
+# Familiar 本地基础设施：PostgreSQL + Redis + OpenSandbox(agent 沙箱)
+# 本文件位于 deploy/，从项目根目录启动时用：
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+# 或在 deploy/ 目录下直接：docker compose up -d（此时 .env 应放在 deploy/ 下）。
+# 用法：
+#   1) 先停掉当前用 docker run 起的三个容器（同名会冲突）：
+#      docker rm -f familiar-postgres familiar-redis opensandbox-server
+#   2) 启动：docker compose --env-file .env -f deploy/docker-compose.yml up -d
+#   3) 停止（保留数据）：docker compose ... stop
+#      彻底删除容器+网络（不删数据卷）：docker compose ... down
+#
+# 注：PG/Redis 用命名卷 familiar_pg / familiar_redis，由 compose 自动创建和管理。
+#     Langfuse / ClickHouse / MinIO 的密钥（LF_SALT、LF_ENCRYPTION_KEY、
+#     LF_NEXTAUTH_SECRET、LF_CH_PWD、LF_MINIO_PWD）不在此硬编码，统一从
+#     项目根目录的 .env 读取；本文件的默认值只是 YOUR_* 占位符。
+
+name: familiar
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: familiar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: familiar
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d familiar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: familiar-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "root", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a root ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  opensandbox:
+    image: docker.io/opensandbox/server:latest
+    container_name: opensandbox-server
+    restart: unless-stopped
+    # 用本机 Docker 作为沙箱 runtime，需挂载 docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 官方 docker-runtime 配置（host=0.0.0.0 + [runtime] type="docker"）
+      - ${HOME}/.sandbox.toml:/sandbox.toml:ro
+    ports:
+      - "8080:8080"
+    environment:
+      OPENSANDBOX_INSECURE_SERVER: "YES"   # 无 API key 的本地开发模式
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    # 镜像不认 SANDBOX_CONFIG_PATH 环境变量，必须用 --config 参数显式传
+    command: ["--config", "/sandbox.toml"]
+
+  # ── Langfuse（大模型调用观测 / 链路追踪）──────────────────────
+  # 版本：V4.5（Web 与 Worker 共用同一镜像，分别跑 UI/API 与异步事件处理）。
+  # 复用项目已有的 postgres(5432) 与 redis(6379) 实例，但 Langfuse 使用独立的
+  # langfuse 库（由 langfuse-db-init 一次性建库，幂等），不与 familiar 混用；
+  # ClickHouse / MinIO 仍各起一个（Langfuse 专用，项目未使用）。
+  # Web UI 放到 3001（项目前端占用了 3000）。
+  # 镜像在 docker.langfuse.com，部分版本需先 `docker login docker.langfuse.com`
+  # （免费）才能拉取；若 registry 只发 patch tag 可把 :4.5 改成 :4.5.0。
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.5
+    restart: always
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      langfuse-db-init:
+        condition: service_completed_successfully
+      lf-minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      lf-clickhouse:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:3030:3030
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: ${LANGFUSE_WEB_URL:-http://localhost:3001}
+      DATABASE_URL: postgresql://root:root@postgres:5432/langfuse
+      SALT: ${LF_SALT:-YOUR_LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LF_ENCRYPTION_KEY:-YOUR_LANGFUSE_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://lf-clickhouse:9000
+      CLICKHOUSE_URL: http://lf-clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LF_CH_PWD:-YOUR_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_PWD:-YOUR_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://lf-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_PWD:-YOUR_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://lf-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH:-root}
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.5
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      - "3001:3000"
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: ${LF_NEXTAUTH_SECRET:-YOUR_LANGFUSE_NEXTAUTH_SECRET}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_MEDIA_URL:-http://localhost:9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://lf-minio:9000
+
+  langfuse-db-init:
+    # 一次性初始化：在共享的 postgres 实例里建一个独立的 langfuse 库（幂等）。
+    # 用 postgres 客户端连项目 PG 执行 CREATE DATABASE（库已存在则跳过）。
+    image: postgres:15-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "psql \"postgresql://root:root@postgres:5432/postgres\" -tc \"SELECT 1 FROM pg_database WHERE datname='langfuse'\" | grep -q 1 || psql \"postgresql://root:root@postgres:5432/postgres\" -c \"CREATE DATABASE langfuse\""
+
+  lf-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LF_CH_PWD:-YOUR_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - 127.0.0.1:8123:8123
+      - 127.0.0.1:9000:9000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  lf-minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LF_MINIO_PWD:-YOUR_MINIO_ROOT_PASSWORD}
+    ports:
+      - "9090:9000"
+      - 127.0.0.1:9091:9001
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  # ── 应用侧可观测：OTel Collector + Prometheus + Grafana ──────────
+  # 应用（跑在宿主机）通过 OTLP 把 logs/metrics 发到 collector(4318)，
+  # collector 再分流：logs → ClickHouse 的 logs 库，metrics → :8889 由
+  # Prometheus 抓取。Grafana 读这两边出界面。
+  # 端口：Grafana 3002（3001 是 Langfuse，3000 是项目前端），
+  #       Prometheus 9095（9090 被 MinIO 占用）。
+  logs-db-init:
+    # 一次性建 ClickHouse 的 logs 库（幂等）。表由 collector 的
+    # create_schema 自动建，但库必须先存在。
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    container_name: familiar-logs-db-init
+    restart: "no"
+    depends_on:
+      lf-clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_PASSWORD: ${LF_CH_PWD:-YOUR_CLICKHOUSE_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'clickhouse-client --host lf-clickhouse --port 9000 --user clickhouse --password "$$CLICKHOUSE_PASSWORD" --query "CREATE DATABASE IF NOT EXISTS logs"'
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    container_name: familiar-otel-collector
+    restart: unless-stopped
+    # 镜像默认用非 root（10001），但持久化队列卷是 root 创建的；
+    # 本地开发直接跑 root，省掉 chown 这一步。
+    user: "0:0"
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel/config.yaml:ro
+      - otelcol_data:/var/lib/otelcol
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LF_CH_PWD:-YOUR_CLICKHOUSE_PASSWORD}
+    ports:
+      # 只绑 127.0.0.1：应用在宿主机上，不需要对外暴露 OTLP
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:8889:8889"
+    depends_on:
+      lf-clickhouse:
+        condition: service_healthy
+      logs-db-init:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    container_name: familiar-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9095:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    container_name: familiar-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # 本地单用户，开着匿名只读省得每次登录
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # ClickHouse 数据源插件（Grafana 12+ 用 GF_PLUGINS_PREINSTALL）
+      GF_PLUGINS_PREINSTALL: grafana-clickhouse-datasource
+      # 给 provisioning 里的 $__env{CLICKHOUSE_PASSWORD} 用
+      CLICKHOUSE_PASSWORD: ${LF_CH_PWD:-YOUR_CLICKHOUSE_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3002:3000"
+    depends_on:
+      - prometheus
+
+  # 知识库用的向量库。单容器形态：etcd 用内嵌、对象存储用本地磁盘、消息队列用
+  # rocksmq，不需要再起 etcd / minio 两个服务。数据全在 milvus_data 卷里。
+  # 端口 19530 给 pymilvus，9091 是健康检查/指标。
+  #
+  # 这个实例是本项目自己的知识库存储，`docker compose up -d` 会一起起来。
+  # 之前从 Multimodal_RAG 带过来的 milvus-etcd/minio/standalone 三容器已停用，
+  # 那套的数据不会自动迁过来（库结构也不同），重新导入 PDF 即可。
+  milvus:
+    image: milvusdb/milvus:v2.6.25
+    container_name: familiar-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    # Milvus 官方要求放开 seccomp，否则启动时报 mmap 相关错误
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      DEPLOY_MODE: STANDALONE
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/advanced/etcd.yaml
+      COMMON_STORAGETYPE: local
+      MQ_TYPE: rocksmq
+      MINIO_REGION: us-east-1
+    ports:
+      # 只暴露 SDK 端口。9091（健康/指标）不往外开：本机 9091 已经被
+      # langfuse 的 MinIO 控制台占了，而且健康检查在容器内部就能做。
+      - "19530:19530"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # 知识库的原始文件存储：PDF 原件，以及 ③ 阶段从书里切出来的插图。
+  #
+  # 为什么不复用 lf-minio：那个是 Langfuse 自己的 trace 附件桶，生命周期跟
+  # langfuse-web 绑着（重启/清数据都可能连坐）。知识库的原始文件不该依赖
+  # 一个可观测组件活着。
+  #
+  # 端口：9000 被 lf-clickhouse 的原生 TCP 占了、9090/9091 是 lf-minio，
+  # 所以这里用 9002（S3 API）/ 9003（控制台）。
+  #
+  # 没有 healthcheck：镜像里只有 minio 一个二进制，既没有 curl 也没有 mc，
+  # 容器内没法自检。后端连不上时会明确报错，比塞个假健康检查诚实。
+  #
+  # 镜像为什么不是 minio/minio：官方仓库对本机拉取返回 access denied
+  # （2025 年 MinIO 收紧了免费镜像的分发），quay.io 同样 unauthorized。
+  # milvusdb/minio 是 MinIO 官方 release 的二进制，只是由 Milvus 组织打包，
+  # 原生 arm64，`minio --version` 已核对过是 RELEASE.2024-12-18。
+  minio:
+    image: milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: familiar-minio
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      # 变量名刻意不用 MINIO_ROOT_USER：那个已经被 lf-minio 的 compose 引用了，
+      # 在这里赋值会顺手改掉 Langfuse 的账号。
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-familiar}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-familiar-dev-secret}
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - minio_data:/data
+
+  # Milvus 的图形化管理界面。看 collection、字段、索引、数据行，调试检索时很省事。
+  # 宿主 3000 被前端 dev server 占着、3001 是 Langfuse、3002 是 Grafana，所以放 8000。
+  attu:
+    image: zilliz/attu:v2.5
+    container_name: familiar-attu
+    restart: unless-stopped
+    environment:
+      # 走容器网络直连 milvus 服务，不用宿主 IP
+      MILVUS_URL: milvus:19530
+    ports:
+      - "8000:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+    name: familiar_pg
+  redisdata:
+    name: familiar_redis
+  langfuse_clickhouse_data:
+    driver: local
+  langfuse_clickhouse_logs:
+    driver: local
+  langfuse_minio_data:
+    driver: local
+  otelcol_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  minio_data:
+    driver: local
+  milvus_data:
+    driver: local

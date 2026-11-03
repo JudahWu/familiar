@@ -1,0 +1,53 @@
+.agents-ui {
+  --ui-bg: var(--background);
+  --ui-surface: var(--card);
+  --ui-panel: var(--muted);
+  --ui-panel-2: var(--secondary);
+  --ui-border: var(--border);
+  --ui-border-subtle: var(--border);
+  --ui-text: var(--foreground);
+  --ui-text-muted: var(--muted-foreground);
+  --ui-text-dim: var(--muted-foreground);
+  --ui-accent: var(--primary);
+  --ui-accent-bubble: var(--sidebar-accent);
+  --ui-sidebar: var(--sidebar);
+  --ui-sidebar-hover: var(--accent);
+  --ui-success: var(--success);
+  --ui-warning: var(--warning);
+  --ui-danger: var(--destructive);
+  /* 小面积指示器专用高亮色（状态点、进度点）。 */
+  --ui-success-vivid: var(--success-vivid);
+  --ui-warning-vivid: var(--warning-vivid);
+  --ui-danger-vivid: var(--destructive-vivid);
+}
+
+.agents-ui {
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.agents-ui * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.agents-ui .shimmer-text {
+  background: linear-gradient(90deg, var(--ui-text-muted) 40%, var(--ui-accent) 50%, var(--ui-text-muted) 60%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -moz-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: agents-shimmer 4s linear infinite;
+}
+
+@keyframes agents-shimmer {
+  0% {
+    background-position: 200% center;
+  }
+  100% {
+    background-position: -200% center;
+  }
+}
